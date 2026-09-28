@@ -1,0 +1,6 @@
+flask
+gunicorn
+requests
+supabase
+Wikipedia-API
+gigachat
