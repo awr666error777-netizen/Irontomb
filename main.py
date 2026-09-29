@@ -340,7 +340,7 @@ def extract_facts_with_context(history_before_answer, user_message, chat_id, cha
     return facts
 
 
-def save_global_facts(facts, chat_id, chat_type):
+def save_global_facts(facts, chat_id, user_id, chat_type):
     for f in facts:
         supabase.table('global_facts').insert({
             'fact_text': f['fact'],
@@ -570,7 +570,7 @@ def webhook():
             return 'OK'
 
         # --- Основной диалог ---
-        history = load_history(chat_id)
+        history = load_history(chat_id, user_id, text)
         history.append({"role": "user", "content": text})
         history_before_answer = history.copy()
 
