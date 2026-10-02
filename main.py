@@ -106,8 +106,7 @@ SYSTEM_PROMPT = {
 # ------------------------------------------------------------
 # Особые собеседники: Telegram ID -> дополнительная инструкция
 # ------------------------------------------------------------
-SPECIAL_USERS = {
-    5570063787: (
+5570063787: (
         "Это твой создатель. Относись к нему особенно тепло и по-свойски, "
         "будь с ним чуть игривее и откровеннее, чем с остальными, "
         "можешь в шутку подкалывать его по-доброму. "
@@ -159,19 +158,31 @@ def set_typing(chat_id):
 
 
 _bot_id = None
+_bot_username = None
+
+
+def _load_bot_info():
+    global _bot_id, _bot_username
+    try:
+        resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe", timeout=10).json()
+        if resp.get('ok'):
+            _bot_id = resp['result']['id']
+            _bot_username = (resp['result'].get('username') or '').lower()
+    except Exception:
+        pass
 
 
 def get_bot_id():
     """id самого бота (нужен, чтобы понять, что сообщение — reply именно ему)."""
-    global _bot_id
     if _bot_id is None:
-        try:
-            resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe", timeout=10).json()
-            if resp.get('ok'):
-                _bot_id = resp['result']['id']
-        except Exception:
-            pass
+        _load_bot_info()
     return _bot_id
+
+
+def get_bot_username():
+    if _bot_username is None:
+        _load_bot_info()
+    return _bot_username
 
 
 def search_wikipedia(query, lang='ru'):
@@ -551,14 +562,16 @@ def webhook():
         bot_id = get_bot_id()
         to_bot = bool(reply_from.get('is_bot')) and (bot_id is None or reply_from.get('id') == bot_id)
         is_command = text.startswith('/')
+        bot_username = get_bot_username()
+        mentioned = bool(bot_username) and ('@' + bot_username) in text_lower
         # Исключение: админ отвечает «исключи» на сообщение человека, которого надо забанить
         kick_by_reply = (
             bool(reply_from) and not reply_from.get('is_bot')
             and any(t in text_lower for t in KICK_TRIGGERS)
         )
-        if not (to_bot or is_command or kick_by_reply):
+        if not (to_bot or is_command or mentioned or kick_by_reply):
             return 'OK'
-        if kick_by_reply and not (to_bot or is_command):
+        if kick_by_reply and not (to_bot or is_command or mentioned):
             if not is_chat_admin(chat_id, user_id):
                 return 'OK'  # обычный разговор людей между собой — молчим
 
@@ -651,7 +664,7 @@ def webhook():
         text = f"Напиши короткое стихотворение {topic}. Без вступления и пояснений, только сам стих."
 
     # --- /clear ---
-    if text == '/clear':
+    if text.split('@')[0] == '/clear':
         supabase.table('users').delete().eq('chat_id', chat_id).execute()
         supabase.table('global_facts').delete().eq('source_chat_id', chat_id).execute()
         try:
@@ -666,7 +679,7 @@ def webhook():
         return 'OK'
 
     # --- /start ---
-    if text == '/start':
+    if text.split('@')[0] == '/start':
         send_telegram_message(chat_id, "Привет! Я Кирена")
         return 'OK'
 
