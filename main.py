@@ -103,6 +103,18 @@ SYSTEM_PROMPT = {
 Твой ответ: Точную цифру не помню, вроде около полутора миллионов. Лучше перепроверь."""
 }
 
+# ------------------------------------------------------------
+# Особые собеседники: Telegram ID -> дополнительная инструкция
+# ------------------------------------------------------------
+SPECIAL_USERS = {
+    5570063787: (
+        "Это твой создатель. Относись к нему особенно тепло и по-свойски, "
+        "будь с ним чуть игривее и откровеннее, чем с остальными, "
+        "можешь в шутку подкалывать его по-доброму."
+    ),
+    # 123456789: "Это Вася, он любит шутки, подкалывай его по-доброму.",
+}
+
 
 # ------------------------------------------------------------
 # GigaChat: единая функция вызова
@@ -296,7 +308,7 @@ def find_kick_target(msg, chat_id):
 # ------------------------------------------------------------
 # История диалога (Supabase)
 # ------------------------------------------------------------
-def load_history(chat_id):
+def load_history(chat_id, user_id=None):
     data = supabase.table('users').select('history').eq('chat_id', chat_id).execute()
     history = data.data[0].get('history', []) if data.data else []
 
@@ -324,6 +336,10 @@ def load_history(chat_id):
     if chat_type == 'group':
         user_info += " Это групповой чат. Обращайся к людям по именам, если знаешь их."
     system_content += user_info
+
+    extra = SPECIAL_USERS.get(user_id)
+    if extra:
+        system_content += "\n\nОСОБАЯ ИНСТРУКЦИЯ ДЛЯ ТЕКУЩЕГО СОБЕСЕДНИКА: " + extra
 
     system_msg = {"role": "system", "content": system_content}
 
@@ -696,7 +712,7 @@ def webhook():
             return 'OK'
 
         # --- Основной диалог ---
-        history = load_history(chat_id)
+        history = load_history(chat_id, user_id)
         history.append({"role": "user", "content": text})
         history_before_answer = history.copy()
 
