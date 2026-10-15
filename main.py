@@ -2,6 +2,7 @@ import os
 import random
 import re
 import threading
+import time
 import traceback
 from datetime import datetime, timedelta, timezone
 
@@ -9,8 +10,6 @@ import requests
 import wikipediaapi
 from flask import Flask, request
 from supabase import create_client
-from gigachat import GigaChat
-from gigachat.models import Chat, Messages, MessagesRole
 
 app = Flask(__name__)
 
@@ -20,23 +19,19 @@ supabase = create_client(
 )
 
 # ------------------------------------------------------------
-# GigaChat вместо Groq
+# Groq API (OpenAI-совместимый)
 # ------------------------------------------------------------
-giga_client = GigaChat(
-    credentials=os.environ.get('GIGACHAT_CREDENTIALS'),
-    scope=os.environ.get('GIGACHAT_SCOPE', 'GIGACHAT_API_PERS'),
-    verify_ssl_certs=False,
-)
-MODEL_NAME = os.environ.get('GIGACHAT_MODEL', 'GigaChat-2-Max')
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
+# Точный ID модели сверьте в Playground GroqCloud (кнопка «View Code»)
+GROQ_MODEL = os.environ.get('GROQ_MODEL', 'qwen/qwen3.8-27b')
+GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions'
+# 'none' отключает режим размышлений (быстрее и дешевле по токенам).
+# Пустая строка в переменной окружения — параметр не передаётся вообще.
+GROQ_REASONING_EFFORT = os.environ.get('GROQ_REASONING_EFFORT', 'none')
+_send_reasoning_param = bool(GROQ_REASONING_EFFORT)
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 AUTHORIZED_USER_ID = int(os.environ.get('AUTHORIZED_USER_ID', 0))
-
-ROLE_MAP = {
-    'system': MessagesRole.SYSTEM,
-    'user': MessagesRole.USER,
-    'assistant': MessagesRole.ASSISTANT,
-}
 
 # Защита от двойных сообщений
 processing_lock = threading.Lock()
@@ -107,7 +102,7 @@ SYSTEM_PROMPT = {
 # Особые собеседники: Telegram ID -> дополнительная инструкция
 # ------------------------------------------------------------
 SPECIAL_USERS = {
-5570063787: (
+    5570063787: (
         "Это твой создатель. Относись к нему особенно тепло и по-свойски, "
         "будь с ним чуть игривее и откровеннее, чем с остальными, "
         "можешь в шутку подкалывать его по-доброму. "
@@ -122,20 +117,69 @@ SPECIAL_USERS = {
 
 
 # ------------------------------------------------------------
-# GigaChat: единая функция вызова
+# Groq: единая функция вызова
 # ------------------------------------------------------------
-def gigachat_complete(messages, temperature=0.6, max_tokens=4096):
-    payload = Chat(
-        model=MODEL_NAME,
-        messages=[
-            Messages(role=ROLE_MAP.get(m['role'], MessagesRole.USER), content=m['content'])
-            for m in messages
-        ],
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-    response = giga_client.chat(payload)
-    return response.choices[0].message.content
+def strip_think(text):
+    """Убирает блоки размышлений модели."""
+    text = re.sub(r'<\s*think\s*>.*?<\s*/\s*think\s*>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<\s*think\s*>.*$', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<\s*/\s*think\s*>', '', text, flags=re.IGNORECASE)
+    return text.strip()
+
+
+def normalize_messages(messages):
+    """Объединяет все system-сообщения в одно в начале (так надёжнее для шаблонов Qwen)."""
+    system_parts = [m['content'] for m in messages if m['role'] == 'system' and m.get('content')]
+    rest = [
+        {'role': m['role'], 'content': m['content']}
+        for m in messages if m['role'] != 'system'
+    ]
+    result = []
+    if system_parts:
+        result.append({'role': 'system', 'content': '\n\n'.join(system_parts)})
+    return result + rest
+
+
+def groq_complete(messages, temperature=0.6, max_tokens=4096):
+    global _send_reasoning_param
+    headers = {
+        'Authorization': f'Bearer {GROQ_API_KEY}',
+        'Content-Type': 'application/json',
+    }
+    messages = normalize_messages(messages)
+
+    for attempt in range(4):
+        payload = {
+            'model': GROQ_MODEL,
+            'messages': messages,
+            'temperature': temperature,
+            'max_tokens': max_tokens,
+        }
+        use_reasoning = _send_reasoning_param
+        if use_reasoning:
+            payload['reasoning_effort'] = GROQ_REASONING_EFFORT
+
+        resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=60)
+
+        # Модель не поддерживает параметр размышлений: больше его не отправляем
+        if resp.status_code == 400 and use_reasoning:
+            _send_reasoning_param = False
+            continue
+
+        # Лимит запросов: коротко ждём и повторяем
+        if resp.status_code == 429 and attempt < 3:
+            try:
+                wait = float(resp.headers.get('retry-after', 2))
+            except ValueError:
+                wait = 2
+            time.sleep(min(max(wait, 1), 10))
+            continue
+
+        resp.raise_for_status()
+        content = resp.json()['choices'][0]['message'].get('content') or ''
+        return strip_think(content)
+
+    raise RuntimeError('Groq API: не удалось получить ответ')
 
 
 # ------------------------------------------------------------
@@ -283,7 +327,7 @@ def evaluate_kick_reason(reason_text):
         "Ответь только одно слово: \"серьёзно\" или \"несерьёзно\"."
     )
     try:
-        result = gigachat_complete([{"role": "user", "content": prompt}], temperature=0.1, max_tokens=50)
+        result = groq_complete([{"role": "user", "content": prompt}], temperature=0.1, max_tokens=50)
         result = result.strip().lower()
         return 'серьёзно' in result and 'несерьёзно' not in result
     except Exception:
@@ -387,7 +431,7 @@ def summarize_text(history_chunk):
         "Сделай очень краткое резюме этого диалога (2-3 предложения), "
         "сохранив ключевые факты и договорённости:\n" + transcript
     )
-    return gigachat_complete([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=200)
+    return groq_complete([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=200)
 
 
 def compress_history(history, keep_last=5, max_messages=18):
@@ -434,7 +478,7 @@ def extract_facts_with_context(history_before_answer, user_message, chat_id, cha
         "Факты с оценкой:"
     )
 
-    content = (gigachat_complete([{"role": "user", "content": prompt}], temperature=0.1, max_tokens=300) or "").strip()
+    content = (groq_complete([{"role": "user", "content": prompt}], temperature=0.1, max_tokens=300) or "").strip()
     if not content:
         return []
 
@@ -741,12 +785,9 @@ def webhook():
                 typing_event.wait(4)
         threading.Thread(target=keep_typing, daemon=True).start()
 
-        raw_answer = gigachat_complete(history, temperature=0.7, max_tokens=1024) or ""
+        raw_answer = groq_complete(history, temperature=0.7, max_tokens=1024) or ""
 
-        # Фильтр «мыслей» и тегов
-        raw_answer = re.sub(r'<\s*think\s*>.*?<\s*/\s*think\s*>', '', raw_answer, flags=re.DOTALL | re.IGNORECASE)
-        raw_answer = re.sub(r'<\s*think\s*>.*$', '', raw_answer, flags=re.DOTALL | re.IGNORECASE)
-        raw_answer = re.sub(r'<\s*/\s*think\s*>', '', raw_answer, flags=re.IGNORECASE)
+        # Фильтр тегов (блоки размышлений уже убраны внутри groq_complete)
         raw_answer = re.sub(r'<[^>]+>', '', raw_answer)
         answer = '\n'.join(line.strip() for line in raw_answer.split('\n') if line.strip()).strip()
         if not answer:
