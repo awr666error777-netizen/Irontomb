@@ -785,7 +785,7 @@ def webhook():
                 typing_event.wait(4)
         threading.Thread(target=keep_typing, daemon=True).start()
 
-        raw_answer = groq_complete(history, temperature=0.7, max_tokens=1024) or ""
+        raw_answer = groq_complete(history, temperature=0.4, max_tokens=1024) or ""
 
         # Фильтр тегов (блоки размышлений уже убраны внутри groq_complete)
         raw_answer = re.sub(r'<[^>]+>', '', raw_answer)
