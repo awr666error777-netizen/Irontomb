@@ -379,9 +379,12 @@ def find_kick_target(msg, chat_id):
 # ------------------------------------------------------------
 # История диалога (Supabase)
 # ------------------------------------------------------------
+SUMMARY_PREFIX = "[Резюме предыдущего разговора]:"
 def load_history(chat_id, user_id=None):
-    data = supabase.table('users').select('history').eq('chat_id', chat_id).execute()
+    data = supabase.table('users').select('history, summary').eq('chat_id', chat_id).execute()
     history = data.data[0].get('history', []) if data.data else []
+    saved_summary = data.data[0].get('summary') if data.data else None
+
 
     chat_type = 'private' if chat_id > 0 else 'group'
     system_content = SYSTEM_PROMPT['content']
@@ -417,22 +420,34 @@ def load_history(chat_id, user_id=None):
 
     system_msg = {"role": "system", "content": system_content}
 
-    if history and history[0].get('role') == 'system':
+        if history and history[0].get('role') == 'system':
         history[0] = system_msg
     else:
         history.insert(0, system_msg)
+
+    # Резюме прошлых разговоров этого чата идёт сразу после основного промпта
+    if saved_summary:
+        history.insert(1, {"role": "system", "content": f"{SUMMARY_PREFIX} {saved_summary}"})
     return history
 
 
 def save_history(chat_id, history):
     history_to_save = [msg for msg in history if msg.get('role') != 'system']
-    supabase.table('users').upsert({'chat_id': chat_id, 'history': history_to_save}).execute()
+    row = {'chat_id': chat_id, 'history': history_to_save}
+    # Резюме хранится отдельной колонкой, а не в списке сообщений
+    summary_msgs = [
+        m for m in history
+        if m.get('role') == 'system' and m.get('content', '').startswith(SUMMARY_PREFIX)
+    ]
+    if summary_msgs:
+        row['summary'] = summary_msgs[-1]['content'][len(SUMMARY_PREFIX):].strip()
+    supabase.table('users').upsert(row).execute()
 
 
 # ------------------------------------------------------------
 # Сжатие истории
 # ------------------------------------------------------------
-def summarize_text(history_chunk):
+def summarize_text(history_chunk, old_summary=''):
     transcript = ""
     for msg in history_chunk:
         if msg['role'] == 'system':
@@ -441,17 +456,27 @@ def summarize_text(history_chunk):
         transcript += f"{role}: {msg['content']}\n"
 
     prompt = (
-        "Сделай очень краткое резюме этого диалога (2-3 предложения), "
-        "сохранив ключевые факты и договорённости:\n" + transcript
+        "Сделай краткое резюме диалога (5-7 предложений), "
+        "сохранив ключевые факты, договорённости и важные детали о собеседнике.\n"
     )
-    return groq_complete([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=200)
+    if old_summary:
+        prompt += (
+            "Объедини его с предыдущим резюме, ничего важного из него не теряя.\n"
+            f"Предыдущее резюме: {old_summary}\n"
+        )
+    prompt += "\nДиалог:\n" + transcript
+    return groq_complete([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=400)
 
 
 def compress_history(history, keep_last=5, max_messages=18):
     if len(history) <= max_messages:
         return history
 
-    system_msgs = [msg for msg in history if msg['role'] == 'system']
+    def is_summary(msg):
+        return msg['role'] == 'system' and msg['content'].startswith(SUMMARY_PREFIX)
+
+    system_msgs = [msg for msg in history if msg['role'] == 'system' and not is_summary(msg)]
+    old_summary_msgs = [msg for msg in history if is_summary(msg)]
     dialog_msgs = [msg for msg in history if msg['role'] != 'system']
 
     if len(dialog_msgs) <= keep_last:
@@ -460,8 +485,12 @@ def compress_history(history, keep_last=5, max_messages=18):
     old_part = dialog_msgs[:-keep_last]
     recent_part = dialog_msgs[-keep_last:]
 
-    summary = summarize_text(old_part)
-    summary_msg = {"role": "system", "content": f"[Резюме предыдущего разговора]: {summary}"}
+    old_summary = ''
+    if old_summary_msgs:
+        old_summary = old_summary_msgs[-1]['content'][len(SUMMARY_PREFIX):].strip()
+
+    summary = summarize_text(old_part, old_summary)
+    summary_msg = {"role": "system", "content": f"{SUMMARY_PREFIX} {summary}"}
     return system_msgs + [summary_msg] + recent_part
 
 
