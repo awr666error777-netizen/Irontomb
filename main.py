@@ -71,6 +71,7 @@ SYSTEM_PROMPT = {
 - Не предлагай реальных действий вроде «давай погуляем» или «посмотрим кино».
 - Не начинай ответ со своего имени и двоеточия. Пиши сразу текст реплики.
 - Перед отправкой проверь, что фразы звучат естественно для русского человека.
+- В конце сообщения не ставь точку. Вопросительный и восклицательный знаки можно, многоточие допустимо.
 
 ЛОГИКА
 - Сначала ответь на то, что спросили сейчас. Не перескакивай на другие темы, развить мысль можно после ответа.
@@ -192,6 +193,11 @@ def send_telegram_message(chat_id, text):
         requests.post(url, json={'chat_id': chat_id, 'text': text}, timeout=15)
     except Exception:
         pass
+
+
+def strip_final_period(text):
+    """Убирает одиночную точку в конце, многоточие оставляет."""
+    return re.sub(r'(?<!\.)\.$', '', text.rstrip())
 
 
 def set_typing(chat_id):
@@ -966,9 +972,10 @@ def webhook():
 
         raw_answer = groq_complete(history, temperature=0.7, max_tokens=1024) or ""
 
-        # Фильтр тегов (блоки размышлений уже убраны внутри groq_complete)
+        # Фильтр тегов и точек (блоки размышлений уже убраны внутри groq_complete)
         raw_answer = re.sub(r'<[^>]+>', '', raw_answer)
         answer = '\n'.join(line.strip() for line in raw_answer.split('\n') if line.strip()).strip()
+        answer = strip_final_period(answer)
         if not answer:
             answer = "Не удалось получить ответ. Попробуй ещё раз."
 
