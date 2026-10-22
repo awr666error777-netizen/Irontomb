@@ -420,7 +420,7 @@ def load_history(chat_id, user_id=None):
 
     system_msg = {"role": "system", "content": system_content}
 
-        if history and history[0].get('role') == 'system':
+    if history and history[0].get('role') == 'system':
         history[0] = system_msg
     else:
         history.insert(0, system_msg)
