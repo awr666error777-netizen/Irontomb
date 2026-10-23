@@ -378,6 +378,69 @@ def find_kick_target(msg, chat_id):
 
 
 # ------------------------------------------------------------
+# Время: текущее по Москве и паузы между сообщениями
+# ------------------------------------------------------------
+MSK = timezone(timedelta(hours=3))  # Москва: UTC+3 круглый год
+WEEKDAYS_RU = ('понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье')
+MONTHS_RU = (
+    'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+    'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
+)
+PAUSE_NOTE_MIN_SECONDS = 600  # пометку о паузе добавляем, если прошло 10 минут и больше
+
+
+def format_duration(seconds):
+    seconds = int(seconds)
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    parts = []
+    if days:
+        parts.append(f"{days} дн.")
+    if hours:
+        parts.append(f"{hours} ч")
+    if minutes and not days:
+        parts.append(f"{minutes} мин")
+    return ' '.join(parts) or 'меньше минуты'
+
+
+def build_time_block(history):
+    """Блок для системного промпта: сколько сейчас по Москве и как давно писали в этом чате."""
+    now = datetime.now(MSK)
+    line = (
+        f"Сейчас по Москве: {now.day} {MONTHS_RU[now.month - 1]} {now.year}, "
+        f"{WEEKDAYS_RU[now.weekday()]}, {now:%H:%M}."
+    )
+    last_ts = next((m.get('ts') for m in reversed(history) if m.get('ts')), None)
+    if last_ts:
+        gap = time.time() - last_ts
+        if gap >= 60:
+            line += f" Предыдущее сообщение в этом чате было {format_duration(gap)} назад."
+    return (
+        "\n\nВРЕМЯ (справка): " + line +
+        " Учитывай время суток и паузы в разговоре естественно, например, по-другому "
+        "поздоровайся после долгого молчания. Точное время называй только если спросили. "
+        "Пометки вида [пауза …] в начале сообщений служебные: не повторяй их."
+    )
+
+
+def annotate_pauses(history):
+    """Копия истории для модели: перед сообщением после долгой паузы ставит пометку.
+    Поле ts в копию не попадает."""
+    result = []
+    prev_ts = None
+    for m in history:
+        item = {'role': m['role'], 'content': m['content']}
+        ts = m.get('ts')
+        if m['role'] == 'user' and ts and prev_ts and ts - prev_ts >= PAUSE_NOTE_MIN_SECONDS:
+            item['content'] = f"[пауза {format_duration(ts - prev_ts)}] " + item['content']
+        if ts:
+            prev_ts = ts
+        result.append(item)
+    return result
+
+
+# ------------------------------------------------------------
 # История диалога (Supabase)
 # ------------------------------------------------------------
 SUMMARY_PREFIX = "[Резюме предыдущего разговора]:"
@@ -419,6 +482,7 @@ def load_history(chat_id, user_id=None):
     if extra:
         system_content += "\n\nОСОБАЯ ИНСТРУКЦИЯ ДЛЯ ТЕКУЩЕГО СОБЕСЕДНИКА: " + extra
 
+    system_content += build_time_block(history)
     system_msg = {"role": "system", "content": system_content}
 
     if history and history[0].get('role') == 'system':
@@ -994,7 +1058,7 @@ def webhook():
 
         # --- Основной диалог ---
         history = load_history(chat_id, user_id)
-        history.append({"role": "user", "content": text})
+        history.append({"role": "user", "content": text, "ts": msg.get('date')})
         history_before_answer = history.copy()
 
         def keep_typing():
@@ -1003,7 +1067,7 @@ def webhook():
                 typing_event.wait(4)
         threading.Thread(target=keep_typing, daemon=True).start()
 
-        raw_answer = groq_complete(history, temperature=0.7, max_tokens=1024) or ""
+        raw_answer = groq_complete(annotate_pauses(history), temperature=0.7, max_tokens=1024) or ""
 
         # Фильтр тегов и точек (блоки размышлений уже убраны внутри groq_complete)
         raw_answer = re.sub(r'<[^>]+>', '', raw_answer)
@@ -1014,7 +1078,7 @@ def webhook():
 
         typing_event.set()
 
-        history.append({"role": "assistant", "content": answer})
+        history.append({"role": "assistant", "content": answer, "ts": int(time.time())})
         history = compress_history(history, keep_last=5, max_messages=22)
         save_history(chat_id, history)
 
