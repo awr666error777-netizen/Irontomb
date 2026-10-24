@@ -401,6 +401,51 @@ def find_kick_target(msg, chat_id):
 
 
 # ------------------------------------------------------------
+# Стикеры
+# ------------------------------------------------------------
+# Тег -> file_id. Как получить file_id: отправьте стикер боту в личку
+# (с аккаунта владельца), он ответит его file_id. Пока словарь пуст,
+# бот работает как раньше и про стикеры не знает.
+STICKERS = {
+    # 'смех': 'CAACAgIAAxkBAAE...',
+    # 'радость': 'CAACAgIAAxkBAAE...',
+    # 'грусть': 'CAACAgIAAxkBAAE...',
+    # 'удивление': 'CAACAgIAAxkBAAE...',
+    # 'любовь': 'CAACAgIAAxkBAAE...',
+}
+STICKER_TAG_RE = re.compile(r'\[\s*СТИКЕР\s*:\s*([^\]]+?)\s*\]', re.IGNORECASE)
+
+
+def build_sticker_block():
+    """Подсказка для модели: какие стикеры есть и когда их ставить."""
+    if not STICKERS:
+        return ''
+    return (
+        "\n\nСТИКЕРЫ: иногда, примерно в одном ответе из пяти и не чаще, можешь добавить "
+        "в самый конец ответа тег стикера, например [СТИКЕР: смех]. Доступные теги: "
+        + ", ".join(STICKERS) + ". Ставь стикер к месту: после шутки, радостной или "
+        "грустной новости. В серьёзных и тревожных разговорах стикеры не используй. "
+        "Тег пиши только после текста, никогда не объясняй его. Тег не считается эмодзи."
+    )
+
+
+def extract_sticker(answer):
+    """Возвращает (текст без тега, file_id стикера или None)."""
+    match = STICKER_TAG_RE.search(answer)
+    cleaned = STICKER_TAG_RE.sub('', answer).strip()
+    file_id = STICKERS.get(match.group(1).strip().lower()) if match else None
+    return cleaned, file_id
+
+
+def send_sticker(chat_id, file_id):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendSticker"
+    try:
+        requests.post(url, json={'chat_id': chat_id, 'sticker': file_id}, timeout=15)
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------
 # Время: текущее по Москве и паузы между сообщениями
 # ------------------------------------------------------------
 MSK = timezone(timedelta(hours=3))  # Москва: UTC+3 круглый год
@@ -519,6 +564,7 @@ def load_history(chat_id, user_id=None):
     if extra:
         system_content += "\n\nОСОБАЯ ИНСТРУКЦИЯ ДЛЯ ТЕКУЩЕГО СОБЕСЕДНИКА: " + extra
 
+    system_content += build_sticker_block()
     system_content += build_time_block(history)
     system_msg = {"role": "system", "content": system_content}
 
@@ -881,6 +927,15 @@ def webhook():
         remember_user(chat_id, msg.get('from'))
         remember_user(chat_id, (msg.get('reply_to_message') or {}).get('from'))
 
+    # Стикер от владельца в личке: показываем его file_id для словаря STICKERS
+    sticker = msg.get('sticker')
+    if sticker and chat_id > 0 and user_id == AUTHORIZED_USER_ID:
+        send_telegram_message(
+            chat_id,
+            f"file_id:\n{sticker['file_id']}\nЭмодзи: {sticker.get('emoji', '')}"
+        )
+        return 'OK'
+
     # Игнорируем не-текстовые сообщения (фото, стикеры и т.п.)
     if not text:
         return 'OK'
@@ -1108,6 +1163,7 @@ def webhook():
 
         # Фильтр тегов и точек (блоки размышлений уже убраны внутри groq_complete)
         raw_answer = re.sub(r'<[^>]+>', '', raw_answer)
+        raw_answer, sticker_id = extract_sticker(raw_answer)
         answer = '\n'.join(line.strip() for line in raw_answer.split('\n') if line.strip()).strip()
         answer = strip_final_period(answer)
         if not answer:
@@ -1121,6 +1177,8 @@ def webhook():
 
         # Сначала отправляем ответ, потом (не критично) извлекаем факты
         send_telegram_message(chat_id, answer)
+        if sticker_id:
+            send_sticker(chat_id, sticker_id)
 
         # Приоритетный профиль: обновляем после ответа, чтобы не задерживать его
         try:
@@ -1146,7 +1204,7 @@ def webhook():
         send_telegram_message(chat_id, f"Ошибка: {error_str}")
         if AUTHORIZED_USER_ID:
             detail = (
-                f"⚠️ Ошибка у Киры:\n{error_str}\nЧат: {chat_id}\nТекст: {text[:200]}\n\n"
+                f"⚠️ Ошибка у Кирены:\n{error_str}\nЧат: {chat_id}\nТекст: {text[:200]}\n\n"
                 f"Трассировка:\n{traceback.format_exc()}"
             )
             send_telegram_message(AUTHORIZED_USER_ID, detail[:4000])
