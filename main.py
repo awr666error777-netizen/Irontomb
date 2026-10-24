@@ -929,6 +929,8 @@ def webhook():
 
     # Стикер от владельца в личке: показываем его file_id для словаря STICKERS
     sticker = msg.get('sticker')
+    if sticker:
+        print(f"[STICKER] chat={chat_id} user={user_id} owner={AUTHORIZED_USER_ID} private={chat_id > 0}", flush=True)
     if sticker and chat_id > 0 and user_id == AUTHORIZED_USER_ID:
         send_telegram_message(
             chat_id,
@@ -1204,7 +1206,7 @@ def webhook():
         send_telegram_message(chat_id, f"Ошибка: {error_str}")
         if AUTHORIZED_USER_ID:
             detail = (
-                f"⚠️ Ошибка у Кирены:\n{error_str}\nЧат: {chat_id}\nТекст: {text[:200]}\n\n"
+                f"⚠️ Ошибка у Киры:\n{error_str}\nЧат: {chat_id}\nТекст: {text[:200]}\n\n"
                 f"Трассировка:\n{traceback.format_exc()}"
             )
             send_telegram_message(AUTHORIZED_USER_ID, detail[:4000])
