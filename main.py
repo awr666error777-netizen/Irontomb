@@ -426,6 +426,10 @@ def build_sticker_block():
         "в самый конец ответа тег стикера, например [СТИКЕР: смех]. Доступные теги: "
         + ", ".join(STICKERS) + ". Ставь стикер к месту: после шутки, радостной или "
         "грустной новости. В серьёзных и тревожных разговорах стикеры не используй. "
+        # Добавлено строгое правило: стикер только вместе с текстом
+        "ОЧЕНЬ ВАЖНО: стикер всегда является дополнением к тексту. Ты НИКОГДА не отправляешь "
+        "только стикер. Сначала обязательно напиши короткий текст (1-2 предложения), "
+        "и только потом, в самом конце, поставь тег [СТИКЕР: ...]. "
         "Тег пиши только после текста, никогда не объясняй его. Тег не считается эмодзи."
     )
 
@@ -1166,20 +1170,29 @@ def webhook():
 
         # Фильтр тегов и точек (блоки размышлений уже убраны внутри groq_complete)
         raw_answer = re.sub(r'<[^>]+>', '', raw_answer)
+        
+        # Извлекаем стикер
         raw_answer, sticker_id = extract_sticker(raw_answer)
+        
+        # Формируем текст
         answer = '\n'.join(line.strip() for line in raw_answer.split('\n') if line.strip()).strip()
         answer = strip_final_period(answer)
-        if not answer:
+
+        # Если вообще ничего не пришло (ни текста, ни стикера) — это сбой
+        if not answer and not sticker_id:
             answer = "Не удалось получить ответ. Попробуй ещё раз."
 
         typing_event.set()
 
-        history.append({"role": "assistant", "content": answer, "ts": int(time.time())})
+        # Формируем запись в историю
+        history_content = answer if answer else "[отправила стикер]"
+        history.append({"role": "assistant", "content": history_content, "ts": int(time.time())})
         history = compress_history(history, keep_last=5, max_messages=22)
         save_history(chat_id, history)
 
-        # Сначала отправляем ответ, потом (не критично) извлекаем факты
-        send_telegram_message(chat_id, answer)
+        # Сначала отправляем текст, затем стикер (если есть)
+        if answer:
+            send_telegram_message(chat_id, answer)
         if sticker_id:
             send_sticker(chat_id, sticker_id)
 
