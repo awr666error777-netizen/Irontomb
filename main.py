@@ -407,7 +407,7 @@ def find_kick_target(msg, chat_id):
 # (с аккаунта владельца), он ответит его file_id. Пока словарь пуст,
 # бот работает как раньше и про стикеры не знает.
 STICKERS = {
-    'грустная скука': 'CAACAgIAAxkBAAIMG2rcgMXIkFZdrfTrXI2fc6-F6oHLAAIZYQACq6RBSc4j01quXAAB6T0E',
+    'грусть': 'CAACAgIAAxkBAAIMG2rcgMXIkFZdrfTrXI2fc6-F6oHLAAIZYQACq6RBSc4j01quXAAB6T0E',
     # 'смех': 'CAACAgIAAxkBAAE...',
     # 'радость': 'CAACAgIAAxkBAAE...',
     # 'грусть': 'CAACAgIAAxkBAAE...',
