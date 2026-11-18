@@ -912,6 +912,11 @@ def extract_profile_update(context_msgs, profile):
         return {}
     return normalize_profile_updates(raw)
 
+def safe_name(user):
+    name = user.get('first_name') or user.get('username') or 'Аноним'
+    name = re.sub(r'[\n\r:\[\]<>]', '', name).strip()[:30]
+    return name or 'Аноним'
+
 
 # ------------------------------------------------------------
 # Основной вебхук
@@ -1163,8 +1168,17 @@ def webhook():
 
         # --- Основной диалог ---
         history = load_history(chat_id, user_id)
-        history.append({"role": "user", "content": text, "ts": msg.get('date')})
+
+        author = safe_name(msg['from'])
+        content = f"{author}: {text}" if is_group else text
+        history.append({"role": "user", "content": content, "ts": msg.get('date'), "uid": user_id})
+
         history_before_answer = history.copy()
+
+        def author_context(history, user_id, n=3):
+            return [m for m in history
+                if m['role'] == 'user' and m.get('uid') == user_id][-n:]
+
 
         def keep_typing():
             while not typing_event.is_set():
