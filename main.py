@@ -659,7 +659,7 @@ def summarize_text(history_chunk, old_summary=''):
     return groq_complete([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=400)
 
 
-def compress_history(history, keep_last=5, max_messages=18):
+def compress_history(history, keep_last=7, max_messages=20):
     if len(history) <= max_messages:
         return history
 
