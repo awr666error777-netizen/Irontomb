@@ -1231,7 +1231,7 @@ def webhook():
         raw_answer = groq_complete(annotate_pauses(history), temperature=0.7, max_tokens=1024) or ""
 
         # Фильтр тегов и точек (блоки размышлений уже убраны внутри groq_complete)
-        raw_answer = re.sub(r'<[^>]+>', '', raw_answer)
+        raw_answer = re.sub(r'</?[A-Za-z][^>]*>', '', raw_answer)
         
         # Извлекаем стикер
         raw_answer, sticker_id = extract_sticker(raw_answer)
