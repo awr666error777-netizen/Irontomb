@@ -218,8 +218,11 @@ def groq_complete(messages, temperature=0.6, max_tokens=4096):
 
         # Модель не поддерживает параметр размышлений: больше его не отправляем
         if resp.status_code == 400 and use_reasoning:
-            _send_reasoning_param = False
+            if 'reasoning' in resp.text.lower():
+                _send_reasoning_param = False
+            resp.raise_for_status()  # иначе ошибка про длину контекста затрётся
             continue
+
 
         # Лимит запросов: коротко ждём и повторяем
         if resp.status_code == 429 and attempt < 3:
