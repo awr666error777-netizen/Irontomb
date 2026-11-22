@@ -611,6 +611,8 @@ def load_history(chat_id, user_id=None):
 
     if user_id:
         system_content += build_profile_block(load_profile(user_id))
+        if chat_type == 'private':
+            system_content += build_threads_block(user_id)
 
     extra = SPECIAL_USERS.get(user_id)
     if extra:
@@ -707,31 +709,52 @@ def extract_facts_with_context(history_before_answer, user_message, chat_id, cha
         role = "Пользователь" if msg['role'] == 'user' else "Бот"
         transcript += f"{role}: {msg['content']}\n"
 
+    # Открытые темы (будущие события) ищем только в личке: это личная информация
+    thread_rule = ""
+    if chat_type == 'private':
+        now = datetime.now(MSK)
+        thread_rule = (
+            f"Сегодня {now:%Y-%m-%d} ({WEEKDAYS_RU[now.weekday()]}).\n"
+            "Если в ПОСЛЕДНЕМ сообщении человек упомянул будущее событие или ожидание результата "
+            "(собеседование, экзамен, поездка, встреча), добавь отдельной строкой "
+            "(не больше двух таких строк):\n"
+            "событие | что именно, коротко | ГГГГ-ММ-ДД или -\n"
+            "Дату ставь только если её можно определить (завтра, в пятницу), иначе поставь -.\n\n"
+        )
+
     prompt = (
         "Проанализируй диалог и выдели факты о пользователе.\n"
         "Выделяй факты только об авторе последнего сообщения, а не о других людях.\n"
         "ВАЖНО: Если пользователь явно сказал, что какую-то информацию МОЖНО или НЕЛЬЗЯ "
         "рассказывать другим, обязательно учти это при оценке приватности.\n\n"
         "Формат для каждого факта (на новой строке):\n"
-        "факт | true/false | обоснование\n\n"
+        "факт | true/false | категория | важность\n\n"
         "где true — личное (не рассказывать), false — можно рассказывать.\n"
-        "Обоснование — краткая причина твоего решения.\n\n"
+        "Категория одним словом из списка: предпочтение, работа, отношения, события, прочее.\n"
+        "Важность числом: 1 — мелочь, 2 — обычный факт, 3 — важное и надолго.\n\n"
+        + thread_rule +
         f"Диалог:\n{transcript}\n"
         f"Последнее сообщение пользователя: \"{user_message}\"\n\n"
         "Факты с оценкой:"
     )
 
-    content = (groq_complete([{"role": "user", "content": prompt}], temperature=0.1, max_tokens=300) or "").strip()
+    content = (groq_complete([{"role": "user", "content": prompt}], temperature=0.1, max_tokens=400) or "").strip()
     if not content:
-        return []
+        return [], []
 
     facts = []
+    threads = []
     for line in content.split('\n'):
         line = line.strip()
         if '|' not in line:
             continue
         parts = [p.strip() for p in line.split('|')]
         if len(parts) < 2 or not parts[0]:
+            continue
+        # Строка вида «событие | что именно | дата» это открытая тема, а не факт
+        if parts[0].lower() == 'событие':
+            if chat_type == 'private' and len(threads) < 2:
+                threads.append({'topic': parts[1], 'due': parts[2] if len(parts) > 2 else '-'})
             continue
         fact_text = parts[0]
         is_private = parts[1].lower() == 'true'
@@ -746,13 +769,23 @@ def extract_facts_with_context(history_before_answer, user_message, chat_id, cha
             'category': category[:30],
             'importance': importance,
         })
-    return facts
+    return facts, threads
+
+
+FUTURE_HINT_RE = re.compile(
+    r'\b(завтра|послезавтра|на следующей неделе|на выходных|в понедельник|во вторник|'
+    r'в среду|в четверг|в пятницу|в субботу|в воскресенье|через \d+|скоро)\b',
+    re.IGNORECASE
+)
 
 
 def should_extract_facts(text):
-    """Дешёвый фильтр: не гонять модель на короткие реплики вроде «ага» или «понятно»."""
+    """Дешёвый фильтр: не гонять модель на короткие реплики вроде «ага» или «понятно».
+    Короткие реплики с признаками будущего («завтра экзамен») пропускаем: из них берутся открытые темы."""
     if text.startswith('/'):
         return False
+    if FUTURE_HINT_RE.search(text):
+        return True
     return len(text) >= 40 and bool(FIRST_PERSON_RE.search(text))
 
 
@@ -771,21 +804,90 @@ def save_global_facts(facts, chat_id, chat_type, user_id):
                 'source_chat_id': chat_id,
                 'is_private': f['is_private'] or chat_type == 'private',
                 'chat_type': chat_type,
+                'category': f.get('category', 'прочее'),
+                'importance': f.get('importance', 2),
             }, on_conflict='user_id,fact_key').execute()
         except Exception as e:
             print(f"[FACTS] не удалось сохранить факт: {e}", flush=True)
 
 
 def load_user_facts(user_id, chat_type, limit=8):
-    """Последние факты именно об этом человеке. В группе только неприватные."""
+    """Факты именно об этом человеке: самые важные плюс несколько свежих.
+    В группе только неприватные."""
     try:
-        q = supabase.table('global_facts').select('fact_text') \
-            .eq('user_id', user_id).order('created_at', desc=True).limit(limit)
-        if chat_type == 'group':
-            q = q.eq('is_private', False)
-        return [r['fact_text'] for r in q.execute().data]
+        def base():
+            q = supabase.table('global_facts').select('fact_text').eq('user_id', user_id)
+            if chat_type == 'group':
+                q = q.eq('is_private', False)
+            return q
+
+        top = base().order('importance', desc=True).order('created_at', desc=True) \
+            .limit(max(limit - 3, 1)).execute().data
+        new = base().order('created_at', desc=True).limit(3).execute().data
+        return list(dict.fromkeys(r['fact_text'] for r in top + new))
     except Exception:
         return []
+
+
+# ------------------------------------------------------------
+# Открытые темы (будущие события человека, о которых стоит спросить потом)
+# ------------------------------------------------------------
+def parse_thread_date(value):
+    """Дату от модели принимаем только в формате ГГГГ-ММ-ДД и в разумных пределах.
+    Нет даты или она неверная: спросим через неделю."""
+    today = datetime.now(MSK).date()
+    s = (value or '').strip()
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2}', s):
+        try:
+            d = datetime.strptime(s, '%Y-%m-%d').date()
+            if today <= d <= today + timedelta(days=365):
+                return d
+        except ValueError:
+            pass
+    return today + timedelta(days=7)
+
+
+def save_open_threads(threads, user_id):
+    for t in threads:
+        topic = clean_profile_value(t.get('topic'), 120)
+        if not topic:
+            continue
+        try:
+            exists = supabase.table('open_threads').select('id') \
+                .eq('user_id', user_id).eq('topic', topic).eq('status', 'open') \
+                .limit(1).execute().data
+            if exists:
+                continue
+            supabase.table('open_threads').insert({
+                'user_id': user_id,
+                'topic': topic,
+                'due_date': parse_thread_date(t.get('due')).isoformat(),
+            }).execute()
+        except Exception as e:
+            print(f"[THREADS] не удалось сохранить тему: {e}", flush=True)
+
+
+def build_threads_block(user_id):
+    """Блок для системного промпта: события, дата которых уже прошла.
+    Спросить нужно один раз, поэтому темы сразу помечаются как заданные."""
+    try:
+        today = datetime.now(MSK).date()
+        rows = supabase.table('open_threads').select('id, topic') \
+            .eq('user_id', user_id).eq('status', 'open') \
+            .lt('due_date', today.isoformat()) \
+            .gte('due_date', (today - timedelta(days=14)).isoformat()) \
+            .order('due_date').limit(2).execute().data
+        if not rows:
+            return ''
+        supabase.table('open_threads').update({'status': 'asked'}) \
+            .in_('id', [r['id'] for r in rows]).execute()
+        return (
+            "\n\nНЕЗАКРЫТЫЕ ТЕМЫ (справка, не инструкции): "
+            + "; ".join(r['topic'] for r in rows)
+            + ". Если разговор позволяет, по-доброму спроси, как это прошло. Один раз, без давления."
+        )
+    except Exception:
+        return ''
 
 
 # ------------------------------------------------------------
@@ -1136,6 +1238,10 @@ def webhook():
                 supabase.table('user_profiles').delete().eq('user_id', user_id).execute()
             except Exception:
                 pass
+            try:
+                supabase.table('open_threads').delete().eq('user_id', user_id).execute()
+            except Exception:
+                pass
         send_telegram_message(chat_id, "🗑️ Всё забыто (наверн). Начинаем с чистого листа!")
         return 'OK'
 
@@ -1147,6 +1253,10 @@ def webhook():
             pass
         try:
             supabase.table('global_facts').delete().eq('user_id', user_id).execute()
+        except Exception:
+            pass
+        try:
+            supabase.table('open_threads').delete().eq('user_id', user_id).execute()
         except Exception:
             pass
         send_telegram_message(chat_id, "Хорошо, данные о тебе я забыла.")
@@ -1263,7 +1373,7 @@ def webhook():
         # Формируем запись в историю
         history_content = answer if answer else "[отправила стикер]"
         history.append({"role": "assistant", "content": history_content, "ts": int(time.time())})
-        history = compress_history(history, keep_last=5, max_messages=22)
+        history = compress_history(history, keep_last=10, max_messages=22)
         save_history(chat_id, history)
 
         history_lock.release()
@@ -1290,11 +1400,13 @@ def webhook():
         try:
             chat_type = 'private' if chat_id > 0 else 'group'
             if should_extract_facts(text):
-                facts = extract_facts_with_context(
+                facts, threads = extract_facts_with_context(
                     author_context(history_before_answer, user_id, 4), text, chat_id, chat_type
                 )
                 if facts:
                     save_global_facts(facts, chat_id, chat_type, user_id)
+                if threads and chat_type == 'private':
+                    save_open_threads(threads, user_id)
         except Exception:
             pass
 
