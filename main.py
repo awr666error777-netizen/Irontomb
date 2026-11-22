@@ -668,7 +668,7 @@ def summarize_text(history_chunk, old_summary=''):
     return groq_complete([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=400)
 
 
-def compress_history(history, keep_last=7, max_messages=20):
+def compress_history(history, keep_last=10, max_messages=20):
     if len(history) <= max_messages:
         return history
 
@@ -728,13 +728,24 @@ def extract_facts_with_context(history_before_answer, user_message, chat_id, cha
     facts = []
     for line in content.split('\n'):
         line = line.strip()
-        if '|' in line:
-            parts = line.split('|')
-            if len(parts) >= 2:
-                fact_text = parts[0].strip()
-                is_private = parts[1].strip().lower() == 'true'
-                if fact_text:
-                    facts.append({'fact': fact_text, 'is_private': is_private})
+        if '|' not in line:
+            continue
+        parts = [p.strip() for p in line.split('|')]
+        if len(parts) < 2 or not parts[0]:
+            continue
+        fact_text = parts[0]
+        is_private = parts[1].lower() == 'true'
+        category = parts[2] if len(parts) > 2 else 'прочее'
+        try:
+            importance = min(3, max(1, int(parts[3])))
+        except (IndexError, ValueError):
+            importance = 2
+        facts.append({
+            'fact': fact_text,
+            'is_private': is_private,
+            'category': category[:30],
+            'importance': importance,
+        })
     return facts
 
 
